@@ -42,7 +42,7 @@ def format_xy_rows(x: np.ndarray, y: np.ndarray) -> str:
     Output:
         Chuỗi có header `x,y`.
     """
-    raise NotImplementedError("Thành viên 2 copy hàm format_xy_rows từ prototype.")
+    return "x,y\n" + "\n".join(f"{xi:.3f},{yi:.3f}" for xi, yi in zip(x, y))
 
 
 def make_sample_dataset(name: str) -> str:
@@ -55,7 +55,26 @@ def make_sample_dataset(name: str) -> str:
     Output:
         Chuỗi data dạng x,y để đưa vào Text widget.
     """
-    raise NotImplementedError("Thành viên 2 copy hàm make_sample_dataset từ prototype.")
+    rng = np.random.default_rng(7)
+    x = np.linspace(-5, 5, 34)
+
+    if name == "Linear":
+        y = 3.2 * x + 7 + rng.normal(0, 1.1, size=len(x))
+    elif name == "Quadratic":
+        y = 1.4 * x**2 - 2.2 * x + 4 + rng.normal(0, 1.8, size=len(x))
+    elif name == "Cubic":
+        y = 0.35 * x**3 - 1.8 * x**2 + 2.4 * x + 8 + rng.normal(0, 4.2, size=len(x))
+    elif name == "Quartic":
+        y = -0.18 * x**4 + 0.75 * x**3 + 2.4 * x**2 - 5 * x + 15 + rng.normal(0, 5.5, size=len(x))
+    elif name == "Sine wave":
+        y = 11 * np.sin(1.25 * x) + 0.9 * x + rng.normal(0, 1.0, size=len(x))
+    elif name == "Wide quadratic":
+        x = np.linspace(-12, 12, 42)
+        y = 0.42 * x**2 - 1.3 * x + 6 + rng.normal(0, 3.8, size=len(x))
+    else:
+        raise ValueError(f"Unknown sample dataset: {name}")
+
+    return format_xy_rows(x, y)
 
 
 def make_sample_data() -> str:
@@ -68,5 +87,4 @@ def make_sample_data() -> str:
     Output:
         Chuỗi data sample mặc định, nên dùng Cubic.
     """
-    raise NotImplementedError("Thành viên 2 copy hàm make_sample_data từ prototype.")
-
+    return make_sample_dataset("Cubic")
