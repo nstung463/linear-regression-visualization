@@ -35,5 +35,20 @@ def standardize(values: np.ndarray) -> tuple[np.ndarray, float | np.ndarray, flo
         mean: mean của từng cột hoặc scalar.
         std: std của từng cột hoặc scalar. Nếu std = 0 thì đổi thành 1.
     """
-    raise NotImplementedError("Thành viên 1 copy và kiểm tra hàm standardize từ prototype.")
+    values = np.asarray(values, dtype=float)
+
+    if values.ndim == 1:
+        mean = values.mean()
+        std = values.std(ddof=0)
+        if std == 0:
+            std = 1.0
+        return (values - mean) / std, mean, std
+
+    if values.ndim == 2:
+        mean = values.mean(axis=0)
+        std = values.std(axis=0, ddof=0)
+        std = np.where(std == 0, 1.0, std)
+        return (values - mean) / std, mean, std
+
+    raise ValueError("standardize only supports 1D or 2D numpy arrays.")
 
