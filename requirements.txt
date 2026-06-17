@@ -1,3 +1,6 @@
 numpy
 matplotlib
-
+customtkinter
+pillow
+CTkToolTip
+scipy

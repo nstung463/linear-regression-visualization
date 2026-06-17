@@ -1,37 +1,16 @@
-"""
-Owner: Thành viên 3 - Visualization / Plot / Animation.
-
-File này chứa helper liên quan đến animation state.
-
-Lưu ý:
-    - Tkinter `after` có thể vẫn nằm trong GUI vì nó gắn với widget.
-    - File này nên chứa các hàm tính frame tiếp theo, validate index, speed.
-
-Input:
-    - frame_index hiện tại.
-    - total_frames.
-    - playing state.
-
-Output:
-    - frame_index mới.
-    - playing state mới.
-
-TODO:
-    - Nếu nhóm muốn tách animation khỏi GUI, implement helper tại đây.
-"""
+"""Animation index helpers for training frame playback."""
 
 
 def next_frame_index(frame_index: int, total_frames: int) -> tuple[int, bool]:
     """
-    Tính frame tiếp theo.
+    Compute the next animation frame index.
 
-    Input:
-        frame_index: Frame hiện tại.
-        total_frames: Tổng số frame.
-
-    Output:
-        next_index: Frame tiếp theo.
-        should_continue: True nếu animation còn chạy, False nếu đã tới cuối.
+    Returns:
+        next_index: Next frame to display.
+        should_continue: False when the last frame has been reached.
     """
-    raise NotImplementedError("Thành viên 3 implement nếu cần tách logic animation khỏi GUI.")
-
+    if total_frames <= 0:
+        return 0, False
+    if frame_index >= total_frames - 1:
+        return total_frames - 1, False
+    return frame_index + 1, True
