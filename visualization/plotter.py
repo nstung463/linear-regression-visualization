@@ -16,6 +16,8 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator, ScalarFormatter
 from scipy.stats import gaussian_kde
 
+from core.preprocessing import PreprocessReport
+
 from visualization.theme import CHART_COLORS, LEGEND_KWARGS, ThemeMode, apply_plot_theme, get_theme_colors
 
 
@@ -46,6 +48,7 @@ class PlotArtists:
         self.loss_annotation: Any = None
         self.loss_fill: Any = None
         self.residual_lines: LineCollection | None = None
+        self.scatter_test: Any = None
         self.initialized = False
         self.fit_xlim: tuple[float, float] = (0.0, 1.0)
         self.fit_ylim: tuple[float, float] = (0.0, 1.0)
@@ -58,6 +61,8 @@ class PreviewArtists:
 
     def __init__(self) -> None:
         self.scatter: Any = None
+        self.scatter_missing: Any = None
+        self.scatter_outliers: Any = None
         self.hist_bars: Any = None
         self.kde_line: Any = None
         self.initialized = False
@@ -204,6 +209,10 @@ def draw_csv_preview(
     fig: Figure,
     theme_mode: ThemeMode = "dark",
     artists: PreviewArtists | None = None,
+    preprocess_report: PreprocessReport | None = None,
+    x_visual_raw: np.ndarray | None = None,
+    y_target_raw: np.ndarray | None = None,
+    target_scale: float | None = None,
 ) -> PreviewArtists:
     """Draw scatter preview and target histogram with KDE overlay."""
     if artists is None:
@@ -213,6 +222,24 @@ def draw_csv_preview(
         ax_fit.cla()
         ax_loss.cla()
         apply_plot_theme(fig, [ax_fit, ax_loss], theme_mode)
+        artists.scatter_missing = ax_fit.scatter(
+            [],
+            [],
+            c="#888888",
+            alpha=0.55,
+            s=32,
+            marker="x",
+            label="Dropped (missing)",
+        )
+        artists.scatter_outliers = ax_fit.scatter(
+            [],
+            [],
+            c="#E57373",
+            alpha=0.75,
+            s=36,
+            edgecolors="none",
+            label="Dropped (outlier)",
+        )
         artists.scatter = ax_fit.scatter(
             [],
             [],
@@ -220,7 +247,7 @@ def draw_csv_preview(
             alpha=0.65,
             s=28,
             edgecolors="none",
-            label="Data",
+            label="Clean data",
         )
         artists.hist_bars = None
         artists.kde_line, = ax_loss.plot([], [], color=CHART_COLORS["kde"], linewidth=2.0, label="KDE")
@@ -231,9 +258,55 @@ def draw_csv_preview(
     x_visual = np.asarray(x_visual, dtype=float)
     y_target = np.asarray(y_target, dtype=float)
 
+    def _scale_y(value: float) -> float:
+        if target_scale is not None and np.isfinite(value):
+            return float(value) / target_scale
+        return float(value)
+
     artists.scatter.set_offsets(np.column_stack([x_visual, y_target]))
-    _style_fit_axis(ax_fit, x_visual, y_target, [], visual_name, theme_mode)
-    ax_fit.set_title("{} vs {} — {} points".format(visual_name, target_name, len(x_visual)), fontsize=12, pad=10)
+
+    if preprocess_report is not None and x_visual_raw is not None and y_target_raw is not None:
+        x_all = np.asarray(x_visual_raw, dtype=float)
+        y_all = np.asarray(y_target_raw, dtype=float)
+        missing_idx = preprocess_report.missing_mask
+        outlier_idx = preprocess_report.outlier_mask
+
+        missing_x, missing_y = [], []
+        for xi, yi in zip(x_all[missing_idx], y_all[missing_idx]):
+            if np.isfinite(xi) and np.isfinite(yi):
+                missing_x.append(xi)
+                missing_y.append(_scale_y(yi))
+            elif np.isfinite(xi):
+                missing_x.append(xi)
+                missing_y.append(float(np.nanmin(y_target)) if len(y_target) else 0.0)
+            elif np.isfinite(yi):
+                missing_x.append(float(np.nanmin(x_visual)) if len(x_visual) else 0.0)
+                missing_y.append(_scale_y(yi))
+
+        outlier_x = x_all[outlier_idx]
+        outlier_y = np.array([_scale_y(yi) for yi in y_all[outlier_idx]], dtype=float)
+        outlier_keep = np.isfinite(outlier_x) & np.isfinite(outlier_y)
+        artists.scatter_missing.set_offsets(
+            np.column_stack([missing_x, missing_y]) if missing_x else np.empty((0, 2))
+        )
+        artists.scatter_outliers.set_offsets(
+            np.column_stack([outlier_x[outlier_keep], outlier_y[outlier_keep]])
+            if outlier_keep.any()
+            else np.empty((0, 2))
+        )
+    else:
+        artists.scatter_missing.set_offsets(np.empty((0, 2)))
+        artists.scatter_outliers.set_offsets(np.empty((0, 2)))
+
+    _style_fit_axis(ax_fit, x_visual, y_target, [y_target], visual_name, theme_mode)
+    if target_scale is not None:
+        ax_fit.set_ylabel("{} (÷{:.0e})".format(target_name, target_scale), fontsize=11, labelpad=8)
+    title_suffix = " (after preprocess)" if preprocess_report is not None else ""
+    ax_fit.set_title(
+        "{} vs {} — {} points{}".format(visual_name, target_name, len(x_visual), title_suffix),
+        fontsize=12,
+        pad=10,
+    )
     ax_fit.legend(**LEGEND_KWARGS)
 
     ax_loss.cla()
@@ -271,6 +344,9 @@ def init_training_artists(
     visual_feature_index: int,
     feature_names: list[str],
     theme_mode: ThemeMode = "dark",
+    x_test_visual: np.ndarray | None = None,
+    y_test: np.ndarray | None = None,
+    y_test_pred: np.ndarray | None = None,
 ) -> PlotArtists:
     """Create reusable artists for training animation."""
     artists = PlotArtists()
@@ -291,6 +367,10 @@ def init_training_artists(
         for weights in (frames[0].weights, frames[-1].weights):
             _, y_curve = _prediction_curve(model, x_data, weights, visual_feature_index)
             curve_samples.append(y_curve)
+    if y_test is not None:
+        curve_samples.append(np.asarray(y_test, dtype=float).ravel())
+    if y_test_pred is not None:
+        curve_samples.append(np.asarray(y_test_pred, dtype=float).ravel())
 
     x_lo, x_hi, y_lo, y_hi = _style_fit_axis(
         ax_fit, x_visual, y_data, curve_samples, visual_name, theme_mode
@@ -306,9 +386,24 @@ def init_training_artists(
         s=36,
         edgecolors="#1a1a1a",
         linewidths=0.4,
-        label="Observed (x, y)",
+        label="Train data",
         zorder=3,
     )
+    if x_test_visual is not None and y_test is not None and len(y_test) > 0:
+        artists.scatter_test = ax_fit.scatter(
+            np.asarray(x_test_visual, dtype=float),
+            np.asarray(y_test, dtype=float),
+            c=CHART_COLORS["marker"],
+            alpha=0.9,
+            s=64,
+            marker="^",
+            edgecolors="#FFFFFF",
+            linewidths=0.8,
+            label="Test (actual)",
+            zorder=5,
+        )
+    else:
+        artists.scatter_test = ax_fit.scatter([], [], s=0, label="_test")
     artists.line_pred, = ax_fit.plot(
         [],
         [],

@@ -20,12 +20,17 @@ from PIL import Image, ImageDraw
 
 from app.controller import (
     CsvPreviewData,
+    PreprocessResult,
+    TestEvaluationResult,
     TrainingResult,
+    evaluate_on_test_csv,
     load_csv_for_preview,
     prepare_csv_preview,
+    preprocess_csv_selection,
     train_from_csv_selection,
     train_from_text,
 )
+from core.preprocessing import PreprocessOptions
 from data.sample_data import SAMPLE_DATASET_NAMES, make_sample_dataset
 from visualization.animation import next_frame_index
 from visualization.plotter import (
@@ -75,7 +80,13 @@ class PolynomialRegressionApp(ctk.CTk):
         self._training_tree_row_ids: list[str] = []
 
         self.csv_preview: CsvPreviewData | None = None
+        self.preprocess_result: PreprocessResult | None = None
+        self._train_csv_config: dict[str, object] | None = None
         self.csv_path_var = tk.StringVar(value="No file selected")
+        self.drop_missing_var = tk.BooleanVar(value=True)
+        self.remove_outliers_var = tk.BooleanVar(value=True)
+        self.iqr_multiplier_var = tk.DoubleVar(value=1.5)
+        self.normalize_target_var = tk.BooleanVar(value=True)
         self.manual_text_default = "x,y\n-2.0,5.1\n-1.0,3.2\n0.0,1.0\n1.0,2.8\n2.0,6.5\n3.0,10.2"
 
         self.frame_index = 0
@@ -86,6 +97,9 @@ class PolynomialRegressionApp(ctk.CTk):
 
         self.plot_artists = PlotArtists()
         self.preview_artists = PreviewArtists()
+        self.test_eval_window: ctk.CTkToplevel | None = None
+        self._last_test_evaluation: TestEvaluationResult | None = None
+        self._test_eval_visible = True
 
         self._build_layout()
         self._show_empty_plots()
@@ -170,6 +184,7 @@ class PolynomialRegressionApp(ctk.CTk):
         self._build_csv_preview_section()
         self._build_training_data_section()
         self._build_equation_bar()
+        self._init_test_evaluation_state()
         self._build_chart_area()
         self._build_animation_bar()
 
@@ -249,8 +264,39 @@ class PolynomialRegressionApp(ctk.CTk):
         self.visual_combo = ctk.CTkComboBox(tab, values=["—"], command=lambda _v: self.on_csv_columns_changed())
         self.visual_combo.grid(row=7, column=0, sticky="ew", padx=4, pady=2)
 
+        ctk.CTkLabel(tab, text="Pre-processing", font=ctk.CTkFont(weight="bold")).grid(
+            row=8, column=0, sticky="w", padx=4, pady=(10, 2)
+        )
+        ctk.CTkCheckBox(
+            tab,
+            text="Drop null / N-A rows",
+            variable=self.drop_missing_var,
+        ).grid(row=9, column=0, sticky="w", padx=4, pady=2)
+        ctk.CTkCheckBox(
+            tab,
+            text="Remove outliers (IQR)",
+            variable=self.remove_outliers_var,
+        ).grid(row=10, column=0, sticky="w", padx=4, pady=2)
+
+        iqr_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        iqr_frame.grid(row=11, column=0, sticky="ew", padx=4, pady=2)
+        ctk.CTkLabel(iqr_frame, text="IQR multiplier").pack(side="left")
+        ctk.CTkEntry(iqr_frame, textvariable=self.iqr_multiplier_var, width=60).pack(side="right")
+
+        ctk.CTkCheckBox(
+            tab,
+            text="Normalize target (÷1e9)",
+            variable=self.normalize_target_var,
+        ).grid(row=12, column=0, sticky="w", padx=4, pady=2)
+
+        ctk.CTkButton(tab, text="Pre-process Data", command=self.on_preprocess_clicked).grid(
+            row=13, column=0, sticky="ew", padx=4, pady=4
+        )
+        self.preprocess_report_label = ctk.CTkLabel(tab, text="", justify="left", wraplength=250)
+        self.preprocess_report_label.grid(row=14, column=0, sticky="w", padx=4, pady=2)
+
         self.csv_stats_label = ctk.CTkLabel(tab, text="", justify="left")
-        self.csv_stats_label.grid(row=8, column=0, sticky="w", padx=4, pady=4)
+        self.csv_stats_label.grid(row=15, column=0, sticky="w", padx=4, pady=4)
 
     def _build_sample_tab(self) -> None:
         tab = self.input_tabs.add("Sample")
@@ -292,11 +338,11 @@ class PolynomialRegressionApp(ctk.CTk):
 
         self.cards_frame = ctk.CTkFrame(self.main, fg_color="transparent")
         self.cards_frame.grid(row=2, column=0, sticky="ew", pady=4)
-        self.cards_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self.cards_frame.grid_columnconfigure((0, 1, 2, 3, 4), weight=1)
         self.cards_frame.grid_remove()
 
         self.stat_cards: dict[str, ctk.CTkLabel] = {}
-        for index, key in enumerate(["count", "mean_x", "std_y", "missing"]):
+        for index, key in enumerate(["count", "mean_x", "std_y", "missing", "outliers"]):
             card = ctk.CTkFrame(self.cards_frame, corner_radius=10)
             card.grid(row=0, column=index, padx=4, sticky="ew")
             title = ctk.CTkLabel(card, text=key.replace("_", " ").title(), text_color="gray70")
@@ -427,7 +473,7 @@ class PolynomialRegressionApp(ctk.CTk):
 
     def _build_equation_bar(self) -> None:
         self.equation_frame = ctk.CTkFrame(self.main, corner_radius=8)
-        self.equation_frame.grid(row=3, column=0, sticky="ew", pady=4)
+        self.equation_frame.grid(row=2, column=0, sticky="ew", pady=4)
         self.equation_frame.grid_remove()
         ctk.CTkLabel(self.equation_frame, text="Equation", text_color="gray70").pack(anchor="w", padx=12, pady=(8, 0))
         self.equation_label = ctk.CTkLabel(
@@ -446,13 +492,107 @@ class PolynomialRegressionApp(ctk.CTk):
         )
         self.frame_detail_label.pack(fill="x", padx=12, pady=(0, 8))
 
+    def _init_test_evaluation_state(self) -> None:
+        self.test_metric_labels: dict[str, ctk.CTkLabel] = {}
+        self.test_metric_cards: list[ctk.CTkFrame] = []
+
+    def _ensure_test_eval_window(self) -> ctk.CTkToplevel:
+        if self.test_eval_window is not None and self.test_eval_window.winfo_exists():
+            return self.test_eval_window
+
+        window = ctk.CTkToplevel(self)
+        window.title("Test Evaluation")
+        window.geometry("760x480")
+        window.minsize(640, 360)
+        window.transient(self)
+
+        container = ctk.CTkFrame(window, corner_radius=0)
+        container.pack(fill="both", expand=True, padx=12, pady=12)
+        container.grid_columnconfigure((0, 1, 2), weight=1)
+        container.grid_rowconfigure(2, weight=1)
+
+        header = ctk.CTkFrame(container, fg_color="transparent")
+        header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        ctk.CTkLabel(header, text="Test Evaluation", font=ctk.CTkFont(size=18, weight="bold")).pack(
+            side="left"
+        )
+        self.test_eval_toggle_btn = ctk.CTkButton(
+            header,
+            text="▼ Hide details",
+            width=110,
+            fg_color="transparent",
+            border_width=1,
+            command=self._toggle_test_eval_section,
+        )
+        self.test_eval_toggle_btn.pack(side="right")
+
+        self.test_metric_labels = {}
+        self.test_metric_cards = []
+        for index, key in enumerate(["rmse", "mae", "r2"]):
+            card = ctk.CTkFrame(container, corner_radius=8)
+            card.grid(row=1, column=index, padx=6, pady=4, sticky="ew")
+            self.test_metric_cards.append(card)
+            ctk.CTkLabel(card, text=key.upper(), text_color="gray70").pack(padx=10, pady=(6, 0))
+            label = ctk.CTkLabel(card, text="—", font=ctk.CTkFont(size=15, weight="bold"))
+            label.pack(padx=10, pady=(0, 8))
+            self.test_metric_labels[key] = label
+
+        self.test_table_frame = ctk.CTkFrame(container)
+        self.test_table_frame.grid(row=2, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+        self.test_table_frame.grid_columnconfigure(0, weight=1)
+        self.test_table_frame.grid_rowconfigure(0, weight=1)
+
+        test_columns = ("idx", "x", "y_actual", "y_pred", "accuracy")
+        self.test_tree = ttk.Treeview(
+            self.test_table_frame,
+            columns=test_columns,
+            show="headings",
+            height=12,
+        )
+        self.test_tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(self.test_table_frame, orient="vertical", command=self.test_tree.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(self.test_table_frame, orient="horizontal", command=self.test_tree.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        self.test_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        for col, heading, width in (
+            ("idx", "#", 40),
+            ("x", "x", 100),
+            ("y_actual", "y_actual (VND)", 150),
+            ("y_pred", "y_pred (VND)", 150),
+            ("accuracy", "accuracy (%)", 120),
+        ):
+            self.test_tree.heading(col, text=heading)
+            self.test_tree.column(col, width=width, anchor="center")
+
+        window.protocol("WM_DELETE_WINDOW", self._close_test_eval_window)
+        self.test_eval_window = window
+        return window
+
+    def _close_test_eval_window(self) -> None:
+        if self.test_eval_window is not None and self.test_eval_window.winfo_exists():
+            self.test_eval_window.withdraw()
+
+    def _toggle_test_eval_section(self) -> None:
+        self._test_eval_visible = not self._test_eval_visible
+        if self._test_eval_visible:
+            self.test_table_frame.grid()
+            for card in self.test_metric_cards:
+                card.grid()
+            self.test_eval_toggle_btn.configure(text="▼ Hide details")
+        else:
+            self.test_table_frame.grid_remove()
+            for card in self.test_metric_cards:
+                card.grid_remove()
+            self.test_eval_toggle_btn.configure(text="▶ Show details")
+
     def _build_chart_area(self) -> None:
         chart_frame = ctk.CTkFrame(self.main)
-        chart_frame.grid(row=4, column=0, sticky="nsew", pady=4)
+        chart_frame.grid(row=3, column=0, sticky="nsew", pady=4)
         chart_frame.grid_rowconfigure(1, weight=1)
         chart_frame.grid_columnconfigure(0, weight=1)
 
-        self.fig = Figure(figsize=(11, 5.2), dpi=100)
+        self.fig = Figure(figsize=(11, 6.0), dpi=100)
         self.fig.subplots_adjust(left=0.07, right=0.98, top=0.90, bottom=0.14, wspace=0.22)
         self.ax_fit = self.fig.add_subplot(1, 2, 1)
         self.ax_loss = self.fig.add_subplot(1, 2, 2)
@@ -468,7 +608,29 @@ class PolynomialRegressionApp(ctk.CTk):
     def _build_animation_bar(self) -> None:
         self.anim_bar = ctk.CTkFrame(self.main)
         self.anim_bar.grid(row=5, column=0, sticky="ew", pady=(4, 0))
-        self.anim_bar.grid_columnconfigure(3, weight=1)
+        self.anim_bar.grid_columnconfigure(5, weight=1)
+
+        self.check_accuracy_btn = ctk.CTkButton(
+            self.anim_bar,
+            text="Check Accuracy",
+            command=self.on_check_accuracy_clicked,
+            height=32,
+            width=130,
+        )
+        self.check_accuracy_btn.grid(row=0, column=0, padx=(8, 4), pady=8)
+        self.check_accuracy_btn.grid_remove()
+
+        self.view_results_btn = ctk.CTkButton(
+            self.anim_bar,
+            text="View Results",
+            command=self.on_view_test_results_clicked,
+            height=32,
+            width=110,
+            fg_color="transparent",
+            border_width=1,
+        )
+        self.view_results_btn.grid(row=0, column=1, padx=4, pady=8)
+        self.view_results_btn.grid_remove()
 
         icon_first = _make_icon("|◀")
         icon_play = _make_icon("▶")
@@ -477,27 +639,27 @@ class PolynomialRegressionApp(ctk.CTk):
         self.btn_first = ctk.CTkButton(
             self.anim_bar, text="", image=icon_first, width=36, command=self.on_first_frame
         )
-        self.btn_first.grid(row=0, column=0, padx=4, pady=8)
+        self.btn_first.grid(row=0, column=2, padx=4, pady=8)
 
         self.btn_play = ctk.CTkButton(
             self.anim_bar, text="", image=icon_play, width=36, command=self.on_play_pause
         )
-        self.btn_play.grid(row=0, column=1, padx=4, pady=8)
+        self.btn_play.grid(row=0, column=3, padx=4, pady=8)
 
         self.btn_last = ctk.CTkButton(
             self.anim_bar, text="", image=icon_last, width=36, command=self.on_last_frame
         )
-        self.btn_last.grid(row=0, column=2, padx=4, pady=8)
+        self.btn_last.grid(row=0, column=4, padx=4, pady=8)
 
         self.frame_slider = ctk.CTkSlider(self.anim_bar, from_=0, to=1, number_of_steps=1, command=self.on_seek)
-        self.frame_slider.grid(row=0, column=3, sticky="ew", padx=8, pady=8)
+        self.frame_slider.grid(row=0, column=5, sticky="ew", padx=8, pady=8)
         self.frame_slider.set(0)
 
         self.anim_stats_label = ctk.CTkLabel(self.anim_bar, text="Epoch: 0/0 | Loss: — | Speed: 1.0x")
-        self.anim_stats_label.grid(row=0, column=4, padx=8, pady=8)
+        self.anim_stats_label.grid(row=0, column=6, padx=8, pady=8)
 
         speed_frame = ctk.CTkFrame(self.anim_bar, fg_color="transparent")
-        speed_frame.grid(row=0, column=5, padx=4, pady=8)
+        speed_frame.grid(row=0, column=7, padx=4, pady=8)
         ctk.CTkLabel(speed_frame, text="Speed").pack()
         self.speed_combo = ctk.CTkComboBox(
             speed_frame,
@@ -520,6 +682,252 @@ class PolynomialRegressionApp(ctk.CTk):
         self.input_tabs.set("Manual")
         self.status_label.configure(text="Generated sample: {}".format(name))
 
+    def _format_large_number(self, value: float) -> str:
+        return f"{value:,.0f}"
+
+    def _display_scale(self) -> float:
+        """Return multiplier to convert normalized target values back to VND."""
+        if self.preprocess_result and self.preprocess_result.target_scale:
+            return float(self.preprocess_result.target_scale)
+        if self.training_result and self.training_result.preprocess_report:
+            report = self.training_result.preprocess_report
+            if report.target_normalized and report.target_scale:
+                return float(report.target_scale)
+        return 1.0
+
+    def _format_target_value(self, value: float, scale: float | None = None) -> str:
+        """Format target values for display, denormalizing when needed."""
+        multiplier = scale if scale is not None else self._display_scale()
+        return self._format_large_number(float(value) * multiplier)
+
+    def _format_metric_value(self, name: str, value: float, scale: float | None = None) -> str:
+        if name == "r2":
+            return f"{value:.4f}"
+        multiplier = scale if scale is not None else self._display_scale()
+        return self._format_large_number(float(value) * multiplier)
+
+    def _prediction_accuracy_percent(self, y_actual: float, y_pred: float) -> float:
+        """Match ratio: how close prediction is to actual price, as 0–100%."""
+        if not np.isfinite(y_actual) or abs(y_actual) < 1e-12:
+            return 0.0
+        relative_error = abs(y_pred - y_actual) / abs(y_actual)
+        return max(0.0, min(100.0, 100.0 * (1.0 - relative_error)))
+
+    def _get_preprocess_options(self) -> PreprocessOptions:
+        try:
+            multiplier = float(self.iqr_multiplier_var.get())
+        except (tk.TclError, ValueError):
+            multiplier = 1.5
+        if multiplier <= 0:
+            multiplier = 1.5
+        return PreprocessOptions(
+            drop_missing=bool(self.drop_missing_var.get()),
+            remove_outliers=bool(self.remove_outliers_var.get()),
+            iqr_multiplier=multiplier,
+            normalize_target=bool(self.normalize_target_var.get()),
+        )
+
+    def _apply_preset_column_selection(self) -> None:
+        if self.csv_preview is None:
+            return
+        names = self.csv_preview.numeric_names
+        feature_name = "Dien_Tich_m2" if "Dien_Tich_m2" in names else names[0]
+        target_name = "Gia_Nha_VND" if "Gia_Nha_VND" in names else names[-1]
+
+        self.feature_listbox.selection_clear(0, "end")
+        for index, name in enumerate(names):
+            if name == feature_name:
+                self.feature_listbox.selection_set(index)
+        self.target_combo.set(target_name)
+        self.visual_combo.set(feature_name)
+
+    def _load_train_csv(self, path: str) -> None:
+        preview = load_csv_for_preview(path)
+        self.csv_preview = preview
+        self.preprocess_result = None
+        self.csv_path_var.set(path)
+        self._populate_csv_controls(preview)
+        self._populate_csv_table(preview)
+        self.preview_header.grid()
+        self.table_frame.grid()
+        self.cards_frame.grid()
+        self.preprocess_report_label.configure(text="")
+        self.on_csv_columns_changed()
+        self.status_label.configure(text="Loaded {} rows".format(len(preview.rows)))
+
+    def on_preprocess_clicked(self) -> None:
+        if self.csv_preview is None:
+            messagebox.showwarning("Pre-process", "Please load a training CSV file first.")
+            return
+        feature_names = self._selected_feature_names()
+        target_name = self.target_combo.get()
+        visual_name = self.visual_combo.get()
+        if not feature_names or not target_name or not visual_name:
+            messagebox.showwarning("Pre-process", "Please select feature and target columns.")
+            return
+        if visual_name not in feature_names:
+            feature_names = list(dict.fromkeys(feature_names + [visual_name]))
+        try:
+            self.preprocess_result = preprocess_csv_selection(
+                self.csv_preview.numeric_data,
+                feature_names,
+                target_name,
+                visual_name,
+                self._get_preprocess_options(),
+            )
+        except Exception as exc:
+            messagebox.showerror("Pre-process Error", str(exc))
+            return
+
+        report = self.preprocess_result.report
+        self.preprocess_report_label.configure(
+            text=(
+                "Original: {orig} | Missing dropped: {miss} | "
+                "Outliers dropped: {out} | Ready: {final}"
+            ).format(
+                orig=report.n_original,
+                miss=report.n_dropped_missing,
+                out=report.n_dropped_outliers,
+                final=report.n_final,
+            )
+        )
+        self._update_preprocess_preview()
+        self.status_label.configure(text="Pre-processing complete — {} rows ready".format(report.n_final))
+
+    def _get_evaluation_config(self) -> tuple[list[str], str, float | None]:
+        """Resolve feature names, target, and scale used for test evaluation."""
+        if self.preprocess_result is not None:
+            return (
+                list(self.preprocess_result.feature_names),
+                self.preprocess_result.target_name,
+                self.preprocess_result.target_scale,
+            )
+        if self.training_result is not None:
+            report = self.training_result.preprocess_report
+            target_scale = report.target_scale if report and report.target_normalized else None
+            return (
+                list(self.training_result.feature_names),
+                self.training_result.target_name,
+                target_scale,
+            )
+        return list(self.feature_names), self.target_column_name, None
+
+    def on_check_accuracy_clicked(self) -> None:
+        """Browse test CSV, normalize, evaluate, and show metrics."""
+        if self.model is None:
+            messagebox.showwarning("Check Accuracy", "Please train a model first.")
+            return
+
+        path = filedialog.askopenfilename(
+            title="Select test CSV file",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        feature_names, target_name, target_scale = self._get_evaluation_config()
+
+        try:
+            evaluation = evaluate_on_test_csv(
+                self.model,
+                path,
+                feature_names,
+                target_name,
+                target_scale=target_scale,
+            )
+        except Exception as exc:
+            messagebox.showerror("Evaluation Error", str(exc))
+            return
+
+        self._show_test_evaluation_with_eval(evaluation)
+        self.status_label.configure(text="Test evaluation complete — R² = {:.4f}".format(evaluation.metrics["r2"]))
+
+    def _show_test_evaluation_with_eval(self, evaluation: TestEvaluationResult) -> None:
+        """Display test evaluation metrics and table in a separate window."""
+        self._last_test_evaluation = evaluation
+        window = self._ensure_test_eval_window()
+        metrics = evaluation.metrics
+        scale = evaluation.target_scale or self._display_scale()
+
+        self.test_metric_labels["rmse"].configure(text=self._format_metric_value("rmse", metrics["rmse"], scale))
+        self.test_metric_labels["mae"].configure(text=self._format_metric_value("mae", metrics["mae"], scale))
+        self.test_metric_labels["r2"].configure(text=self._format_metric_value("r2", metrics["r2"]))
+
+        self.test_tree.delete(*self.test_tree.get_children())
+        visual_index = self.visual_feature_index
+        x_test = evaluation.x_test
+        x_visual = x_test[:, visual_index] if x_test.ndim == 2 else x_test
+        for index, (x_value, y_actual, y_pred) in enumerate(
+            zip(x_visual, evaluation.y_test, evaluation.y_pred)
+        ):
+            accuracy = self._prediction_accuracy_percent(y_actual, y_pred)
+            self.test_tree.insert(
+                "",
+                "end",
+                values=[
+                    str(index + 1),
+                    f"{x_value:.2f}",
+                    self._format_target_value(y_actual, scale),
+                    self._format_target_value(y_pred, scale),
+                    f"{accuracy:.2f}%",
+                ],
+            )
+
+        if not self._test_eval_visible:
+            self._toggle_test_eval_section()
+
+        window.deiconify()
+        window.lift()
+        window.focus_force()
+        self.view_results_btn.grid()
+
+    def on_view_test_results_clicked(self) -> None:
+        if self._last_test_evaluation is None:
+            messagebox.showinfo("Test Evaluation", "No test results yet. Click Check Accuracy first.")
+            return
+        self._show_test_evaluation_with_eval(self._last_test_evaluation)
+
+    def _update_preprocess_preview(self) -> None:
+        if self.preprocess_result is None:
+            return
+        result = self.preprocess_result
+        visual_index = result.feature_names.index(result.visual_name)
+        x_visual = result.x_data[:, visual_index] if result.x_data.ndim == 2 else result.x_data
+
+        self._update_stat_cards_from_preprocess(result)
+        self.csv_stats_label.configure(
+            text="{} rows ready for training".format(result.report.n_final)
+        )
+        self.viz_mode = "data_preview"
+        self.preview_artists = PreviewArtists()
+        draw_csv_preview(
+            x_visual,
+            result.y_data,
+            result.visual_name,
+            result.target_name,
+            self.ax_fit,
+            self.ax_loss,
+            self.fig,
+            self.theme_mode,
+            self.preview_artists,
+            preprocess_report=result.report,
+            x_visual_raw=result.x_visual_raw,
+            y_target_raw=result.y_target_raw,
+            target_scale=result.target_scale,
+        )
+        self._set_animation_enabled(False)
+        self.equation_frame.grid_remove()
+        self.canvas.draw_idle()
+
+    def _update_stat_cards_from_preprocess(self, result: PreprocessResult) -> None:
+        visual_index = result.feature_names.index(result.visual_name)
+        x_visual = result.x_data[:, visual_index] if result.x_data.ndim == 2 else result.x_data
+        self.stat_cards["count"].configure(text=str(result.report.n_final))
+        self.stat_cards["mean_x"].configure(text="{:.2f}".format(float(np.mean(x_visual))))
+        self.stat_cards["std_y"].configure(text="{:.2f}".format(float(np.std(result.y_data))))
+        self.stat_cards["missing"].configure(text=str(result.report.n_dropped_missing))
+        self.stat_cards["outliers"].configure(text=str(result.report.n_dropped_outliers))
+
     def on_browse_csv(self) -> None:
         path = filedialog.askopenfilename(
             title="Select CSV file",
@@ -528,20 +936,9 @@ class PolynomialRegressionApp(ctk.CTk):
         if not path:
             return
         try:
-            preview = load_csv_for_preview(path)
+            self._load_train_csv(path)
         except Exception as exc:
             messagebox.showerror("CSV Error", str(exc))
-            return
-
-        self.csv_preview = preview
-        self.csv_path_var.set(path)
-        self._populate_csv_controls(preview)
-        self._populate_csv_table(preview)
-        self.preview_header.grid()
-        self.table_frame.grid()
-        self.cards_frame.grid()
-        self.on_csv_columns_changed()
-        self.status_label.configure(text="Loaded {} rows".format(len(preview.rows)))
 
     def _populate_csv_controls(self, preview: CsvPreviewData) -> None:
         self.feature_listbox.delete(0, "end")
@@ -552,12 +949,20 @@ class PolynomialRegressionApp(ctk.CTk):
 
         self.target_combo.configure(values=preview.numeric_names)
         self.visual_combo.configure(values=preview.numeric_names)
-        default_target = "price" if "price" in preview.numeric_names else preview.numeric_names[0]
-        default_visual = (
-            "total_sqft"
-            if "total_sqft" in preview.numeric_names
-            else preview.numeric_names[0]
-        )
+        if "Dien_Tich_m2" in preview.numeric_names:
+            default_visual = "Dien_Tich_m2"
+        elif "total_sqft" in preview.numeric_names:
+            default_visual = "total_sqft"
+        else:
+            default_visual = preview.numeric_names[0]
+
+        if "Gia_Nha_VND" in preview.numeric_names:
+            default_target = "Gia_Nha_VND"
+        elif "price" in preview.numeric_names:
+            default_target = "price"
+        else:
+            default_target = preview.numeric_names[-1]
+
         self.target_combo.set(default_target)
         self.visual_combo.set(default_visual)
 
@@ -587,6 +992,8 @@ class PolynomialRegressionApp(ctk.CTk):
     def on_csv_columns_changed(self) -> None:
         if self.csv_preview is None:
             return
+        self.preprocess_result = None
+        self.preprocess_report_label.configure(text="")
         feature_names = self._selected_feature_names()
         target_name = self.target_combo.get()
         visual_name = self.visual_combo.get()
@@ -605,8 +1012,9 @@ class PolynomialRegressionApp(ctk.CTk):
             return
 
         self._update_stat_cards(result, visual_name, target_name)
+        self.stat_cards["outliers"].configure(text="—")
         self.csv_stats_label.configure(
-            text="{} valid / {} dropped".format(result.n_valid, result.n_dropped)
+            text="{} valid / {} dropped (before preprocess)".format(result.n_valid, result.n_dropped)
         )
         self.viz_mode = "data_preview"
         self.preview_artists = PreviewArtists()
@@ -623,6 +1031,7 @@ class PolynomialRegressionApp(ctk.CTk):
         )
         self._set_animation_enabled(False)
         self.equation_frame.grid_remove()
+        self.canvas.draw_idle()
 
     def _update_stat_cards(self, result: object, visual_name: str, target_name: str) -> None:
         stats = result.column_stats
@@ -637,9 +1046,30 @@ class PolynomialRegressionApp(ctk.CTk):
     def on_train_clicked(self) -> None:
         if self._train_thread and self._train_thread.is_alive():
             return
+        self._train_csv_config = self._snapshot_csv_train_config()
         self._set_training_ui_busy(True)
         self._train_thread = threading.Thread(target=self._train_worker, daemon=True)
         self._train_thread.start()
+
+    def _snapshot_csv_train_config(self) -> dict[str, object] | None:
+        """Capture CSV column selection on the main thread before training."""
+        if self.csv_preview is None:
+            return None
+        if self.input_tabs.get() != "CSV" and self.preprocess_result is None:
+            return None
+
+        feature_names = self._selected_feature_names()
+        target_name = self.target_combo.get()
+        visual_name = self.visual_combo.get()
+        if not feature_names or not target_name or not visual_name:
+            return None
+        if visual_name not in feature_names:
+            feature_names = list(dict.fromkeys(feature_names + [visual_name]))
+        return {
+            "feature_names": feature_names,
+            "target_name": target_name,
+            "visual_name": visual_name,
+        }
 
     def _train_worker(self) -> None:
         try:
@@ -654,17 +1084,29 @@ class PolynomialRegressionApp(ctk.CTk):
         lr = float(self.lr_var.get())
         epochs = int(self.epochs_var.get())
         save_every = max(1, int(self.save_every_var.get()))
-        active_tab = self.input_tabs.get()
 
-        if active_tab == "CSV":
-            if self.csv_preview is None:
-                raise ValueError("Please load a CSV file first.")
-            feature_names = self._selected_feature_names()
-            target_name = self.target_combo.get()
-            visual_name = self.visual_combo.get()
+        if self.preprocess_result is not None and self.csv_preview is not None:
+            result_cfg = self.preprocess_result
+            self.target_column_name = result_cfg.target_name
+            return train_from_csv_selection(
+                self.csv_preview.numeric_data,
+                list(result_cfg.feature_names),
+                result_cfg.target_name,
+                result_cfg.visual_name,
+                degree,
+                lr,
+                epochs,
+                save_every,
+                preprocessed=self.preprocess_result,
+                preprocess_options=self._get_preprocess_options(),
+            )
+
+        if self._train_csv_config is not None and self.csv_preview is not None:
+            cfg = self._train_csv_config
+            feature_names = list(cfg["feature_names"])
+            target_name = str(cfg["target_name"])
+            visual_name = str(cfg["visual_name"])
             self.target_column_name = target_name
-            if visual_name not in feature_names:
-                feature_names = list(dict.fromkeys(feature_names + [visual_name]))
             return train_from_csv_selection(
                 self.csv_preview.numeric_data,
                 feature_names,
@@ -674,6 +1116,8 @@ class PolynomialRegressionApp(ctk.CTk):
                 lr,
                 epochs,
                 save_every,
+                preprocessed=self.preprocess_result,
+                preprocess_options=self._get_preprocess_options(),
             )
 
         self.target_column_name = "y"
@@ -684,12 +1128,15 @@ class PolynomialRegressionApp(ctk.CTk):
         if busy:
             self.train_button.configure(state="disabled", text="Training...")
             self.reset_button.configure(state="disabled")
+            self.check_accuracy_btn.configure(state="disabled")
             self.progress_bar.grid()
             self.progress_bar.start()
             self.status_label.configure(text="Training in progress...")
         else:
             self.train_button.configure(state="normal", text="Train Model")
             self.reset_button.configure(state="normal")
+            if self.model is not None:
+                self.check_accuracy_btn.configure(state="normal")
             self.progress_bar.stop()
             self.progress_bar.grid_remove()
 
@@ -699,12 +1146,12 @@ class PolynomialRegressionApp(ctk.CTk):
         self.status_label.configure(text="Training failed")
 
     def _on_train_complete(self, result: TrainingResult) -> None:
-        self._set_training_ui_busy(False)
         self.training_result = result
         self.model = result.model
         self.x_data = result.x_data
         self.y_data = result.y_data
         self.feature_names = result.feature_names
+        self.target_column_name = result.target_name
         self.visual_feature_index = result.visual_feature_index
         self.viz_mode = "training"
         self.frame_index = 0
@@ -715,7 +1162,13 @@ class PolynomialRegressionApp(ctk.CTk):
         self.cards_frame.grid_remove()
         self.equation_frame.grid()
         self.training_header.grid()
-        self.training_table_frame.grid()
+        self._training_table_visible = False
+        self.training_table_frame.grid_remove()
+        self.training_toggle_btn.configure(text="▶ Training Data (x, y, y_pred, residual)")
+        self.check_accuracy_btn.grid()
+        self.check_accuracy_btn.configure(state="normal")
+
+        self._set_training_ui_busy(False)
 
         self._populate_training_data_table(result.x_data, result.y_data, result.feature_names)
 
@@ -850,6 +1303,8 @@ class PolynomialRegressionApp(ctk.CTk):
         self.y_data = None
         self.training_result = None
         self.csv_preview = None
+        self.preprocess_result = None
+        self._train_csv_config = None
         self.feature_names = []
         self.frame_index = 0
         self.viz_mode = "empty"
@@ -860,6 +1315,10 @@ class PolynomialRegressionApp(ctk.CTk):
         self.table_frame.grid_remove()
         self.cards_frame.grid_remove()
         self.equation_frame.grid_remove()
+        self._close_test_eval_window()
+        self._last_test_evaluation = None
+        self.check_accuracy_btn.grid_remove()
+        self.view_results_btn.grid_remove()
         self.training_header.grid_remove()
         self.training_table_frame.grid_remove()
         self.training_tree.delete(*self.training_tree.get_children())
@@ -867,9 +1326,15 @@ class PolynomialRegressionApp(ctk.CTk):
         self.training_summary_label.configure(text="")
         self.frame_detail_label.configure(text="Weights: —")
         self.csv_path_var.set("No file selected")
+        self.preprocess_report_label.configure(text="")
         self.csv_stats_label.configure(text="")
         for card in self.stat_cards.values():
             card.configure(text="—")
+        if hasattr(self, "test_metric_labels"):
+            for label in self.test_metric_labels.values():
+                label.configure(text="—")
+        if hasattr(self, "test_tree"):
+            self.test_tree.delete(*self.test_tree.get_children())
 
         self._show_empty_plots()
         self._set_animation_enabled(False)
