@@ -156,20 +156,26 @@ def standardize(values: np.ndarray) -> tuple[np.ndarray, float | np.ndarray, flo
         mean: mean của từng cột hoặc scalar.
         std: std của từng cột hoặc scalar. Nếu std = 0 thì đổi thành 1.
     """
+
+    # chuyển đổi values thành numpy array và flatten cho dễ xử lý
     values = np.asarray(values, dtype=float)
 
+    # kiểm tra xem values có phải là 1D array không
     if values.ndim == 1:
-        mean = values.mean()
-        std = values.std(ddof=0)
-        if std == 0:
-            std = 1.0
-        return (values - mean) / std, mean, std
+        # tính toán mean và std
+        mean = values.mean() # mean là giá trị trung bình của values
+        std = values.std(ddof=0) # std là độ lệch chuẩn của values
+        if std == 0: # nếu std bằng 0 thì đổi thành 1
+            std = 1.0 # nếu std bằng 0 thì đổi thành 1
+        return (values - mean) / std, mean, std # trả về scaled_values, mean và std
 
+    # kiểm tra xem values có phải là 2D array không
     if values.ndim == 2:
-        mean = values.mean(axis=0)
-        std = values.std(axis=0, ddof=0)
-        std = np.where(std == 0, 1.0, std)
-        return (values - mean) / std, mean, std
+        # tính toán mean và std
+        mean = values.mean(axis=0) # mean là giá trị trung bình của values
+        std = values.std(axis=0, ddof=0) # std là độ lệch chuẩn của values
+        std = np.where(std == 0, 1.0, std) # nếu std bằng 0 thì đổi thành 1
+        return (values - mean) / std, mean, std # trả về scaled_values, mean và std
 
     raise ValueError("standardize only supports 1D or 2D numpy arrays.")
 
