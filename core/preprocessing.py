@@ -87,10 +87,67 @@ def remove_outliers_iqr(
     return x[keep], y[keep], ~keep
 
 
+def remove_outliers_regression_residual(
+    x: np.ndarray,
+    y: np.ndarray,
+    multiplier: float = 1.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Remove rows whose linear-regression residual exceeds an IQR fence."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float).ravel()
+    if x.ndim == 1:
+        x = x.reshape(-1, 1)
+
+    if len(y) < 4:
+        return x, y, np.zeros(len(y), dtype=bool)
+
+    design = np.column_stack([np.ones(x.shape[0]), x])
+    coeffs, _, _, _ = np.linalg.lstsq(design, y, rcond=None)
+    residuals = np.abs(y - design @ coeffs)
+
+    q1 = float(np.percentile(residuals, 25))
+    q3 = float(np.percentile(residuals, 75))
+    iqr = q3 - q1
+    if iqr == 0:
+        return x, y, np.zeros(len(y), dtype=bool)
+
+    upper = q3 + multiplier * iqr
+    keep = residuals <= upper
+    return x[keep], y[keep], ~keep
+
+
 def normalize_target(y: np.ndarray, scale: float = 1e9) -> tuple[np.ndarray, float]:
     """Normalize target by dividing by scale (default 1 billion for VND)."""
     y = np.asarray(y, dtype=float)
     return y / scale, scale
+
+
+def split_train_test(
+    x: np.ndarray,
+    y: np.ndarray,
+    test_size: float = 0.2,
+    random_state: int = 42,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Shuffle-split arrays into train and hold-out test portions."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float).ravel()
+    if x.ndim == 1:
+        x = x.reshape(-1, 1)
+
+    n_samples = x.shape[0]
+    if n_samples < 5:
+        raise ValueError("Need at least 5 samples for an 80/20 train/test split.")
+
+    n_test = max(1, int(round(n_samples * test_size)))
+    n_test = min(n_test, n_samples - 2)
+
+    indices = np.arange(n_samples)
+    rng = np.random.default_rng(random_state)
+    rng.shuffle(indices)
+
+    test_idx = indices[:n_test]
+    train_idx = indices[n_test:]
+    return x[train_idx], x[test_idx], y[train_idx], y[test_idx]
 
 
 def preprocess_dataset(
@@ -115,7 +172,7 @@ def preprocess_dataset(
         n_dropped_missing = int(missing_mask.sum())
 
     if options.remove_outliers and len(y) > 0:
-        x, y, outlier_mask_partial = remove_outliers_iqr(x, y, options.iqr_multiplier)
+        x, y, outlier_mask_partial = remove_outliers_regression_residual(x, y, options.iqr_multiplier)
         n_dropped_outliers = int(outlier_mask_partial.sum())
         if n_dropped_missing > 0:
             surviving = ~missing_mask

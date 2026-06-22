@@ -23,7 +23,6 @@ from app.controller import (
     PreprocessResult,
     TestEvaluationResult,
     TrainingResult,
-    evaluate_on_test_csv,
     load_csv_for_preview,
     prepare_csv_preview,
     preprocess_csv_selection,
@@ -88,6 +87,7 @@ class PolynomialRegressionApp(ctk.CTk):
         self.iqr_multiplier_var = tk.DoubleVar(value=1.5)
         self.normalize_target_var = tk.BooleanVar(value=True)
         self.manual_text_default = "x,y\n-2.0,5.1\n-1.0,3.2\n0.0,1.0\n1.0,2.8\n2.0,6.5\n3.0,10.2"
+        self.sample_text: str | None = None
 
         self.frame_index = 0
         self.playing = False
@@ -111,7 +111,8 @@ class PolynomialRegressionApp(ctk.CTk):
 
         self.sidebar = ctk.CTkFrame(self, width=300, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(12, weight=1)
+        self.sidebar.grid_columnconfigure(0, weight=1)
+        self.sidebar.grid_rowconfigure(1, weight=1)
 
         ctk.CTkLabel(
             self.sidebar,
@@ -119,14 +120,17 @@ class PolynomialRegressionApp(ctk.CTk):
             font=ctk.CTkFont(size=20, weight="bold"),
         ).grid(row=0, column=0, padx=16, pady=(16, 8), sticky="w")
 
-        self.input_tabs = ctk.CTkTabview(self.sidebar, width=280)
-        self.input_tabs.grid(row=1, column=0, padx=12, pady=8, sticky="ew")
+        self.sidebar_scroll = ctk.CTkScrollableFrame(self.sidebar, corner_radius=0)
+        self.sidebar_scroll.grid(row=1, column=0, sticky="nsew")
+
+        self.input_tabs = ctk.CTkTabview(self.sidebar_scroll, width=280)
+        self.input_tabs.pack(fill="x", padx=12, pady=8)
         self._build_manual_tab()
         self._build_csv_tab()
         self._build_sample_tab()
 
-        ctk.CTkLabel(self.sidebar, text="Hyperparameters", font=ctk.CTkFont(weight="bold")).grid(
-            row=2, column=0, padx=16, pady=(12, 4), sticky="w"
+        ctk.CTkLabel(self.sidebar_scroll, text="Hyperparameters", font=ctk.CTkFont(weight="bold")).pack(
+            anchor="w", padx=16, pady=(12, 4)
         )
 
         self.degree_var = tk.IntVar(value=3)
@@ -134,47 +138,52 @@ class PolynomialRegressionApp(ctk.CTk):
         self.epochs_var = tk.IntVar(value=500)
         self.save_every_var = tk.IntVar(value=1)
 
-        self._add_labeled_slider(self.sidebar, 3, "Degree", self.degree_var, 1, 10, is_int=True)
-        degree_label = self.sidebar.grid_slaves(row=3, column=0)[0]
+        degree_label = self._add_labeled_slider(self.sidebar_scroll, "Degree", self.degree_var, 1, 10, is_int=True)
         CTkToolTip(degree_label, message="Bậc đa thức (1=linear, 2=quadratic, ...)")
 
-        self._add_labeled_slider(self.sidebar, 4, "Learning Rate", self.lr_var, 0.001, 0.2, is_int=False)
-        lr_label = self.sidebar.grid_slaves(row=4, column=0)[0]
+        lr_label = self._add_labeled_slider(
+            self.sidebar_scroll, "Learning Rate", self.lr_var, 0.001, 0.2, is_int=False
+        )
         CTkToolTip(lr_label, message="Tốc độ cập nhật weights mỗi epoch")
 
-        self._add_labeled_slider(self.sidebar, 5, "Epochs", self.epochs_var, 100, 2000, is_int=True)
-        epochs_label = self.sidebar.grid_slaves(row=5, column=0)[0]
+        epochs_label = self._add_labeled_slider(
+            self.sidebar_scroll, "Epochs", self.epochs_var, 100, 2000, is_int=True
+        )
         CTkToolTip(epochs_label, message="Số vòng lặp Gradient Descent")
 
-        save_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        save_frame.grid(row=6, column=0, padx=16, pady=4, sticky="ew")
+        save_frame = ctk.CTkFrame(self.sidebar_scroll, fg_color="transparent")
+        save_frame.pack(fill="x", padx=16, pady=4)
         ctk.CTkLabel(save_frame, text="Save every").pack(side="left")
         ctk.CTkEntry(save_frame, textvariable=self.save_every_var, width=60).pack(side="right")
 
+        self.sidebar_actions = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.sidebar_actions.grid(row=2, column=0, sticky="sew", padx=0, pady=0)
+        self.sidebar_actions.grid_columnconfigure(0, weight=1)
+
         self.train_button = ctk.CTkButton(
-            self.sidebar,
+            self.sidebar_actions,
             text="Train Model",
             height=40,
             font=ctk.CTkFont(size=15, weight="bold"),
             command=self.on_train_clicked,
         )
-        self.train_button.grid(row=7, column=0, padx=16, pady=(16, 4), sticky="ew")
+        self.train_button.grid(row=0, column=0, padx=16, pady=(8, 4), sticky="ew")
 
         self.reset_button = ctk.CTkButton(
-            self.sidebar,
+            self.sidebar_actions,
             text="Reset",
             fg_color="transparent",
             border_width=1,
             command=self.on_reset_clicked,
         )
-        self.reset_button.grid(row=8, column=0, padx=16, pady=4, sticky="ew")
+        self.reset_button.grid(row=1, column=0, padx=16, pady=4, sticky="ew")
 
-        self.progress_bar = ctk.CTkProgressBar(self.sidebar, mode="indeterminate")
-        self.progress_bar.grid(row=9, column=0, padx=16, pady=4, sticky="ew")
+        self.progress_bar = ctk.CTkProgressBar(self.sidebar_actions, mode="indeterminate")
+        self.progress_bar.grid(row=2, column=0, padx=16, pady=4, sticky="ew")
         self.progress_bar.grid_remove()
 
-        self.status_label = ctk.CTkLabel(self.sidebar, text="Ready", text_color="gray70")
-        self.status_label.grid(row=10, column=0, padx=16, pady=(4, 16), sticky="w")
+        self.status_label = ctk.CTkLabel(self.sidebar_actions, text="Ready", text_color="gray70")
+        self.status_label.grid(row=3, column=0, padx=16, pady=(4, 12), sticky="w")
 
         self.main = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         self.main.grid(row=0, column=1, sticky="nsew", padx=8, pady=8)
@@ -191,15 +200,14 @@ class PolynomialRegressionApp(ctk.CTk):
     def _add_labeled_slider(
         self,
         parent: ctk.CTkFrame,
-        row: int,
         label: str,
         variable: tk.Variable,
         from_: float,
         to: float,
         is_int: bool,
-    ) -> None:
+    ) -> ctk.CTkLabel:
         frame = ctk.CTkFrame(parent, fg_color="transparent")
-        frame.grid(row=row, column=0, padx=16, pady=4, sticky="ew")
+        frame.pack(fill="x", padx=16, pady=4)
         value_label = ctk.CTkLabel(frame, text="{}: {}".format(label, variable.get()))
         value_label.pack(anchor="w")
 
@@ -217,6 +225,7 @@ class PolynomialRegressionApp(ctk.CTk):
             number_of_steps=int(to - from_) if is_int else 100,
             command=on_change,
         ).pack(fill="x", pady=(4, 0))
+        return value_label
 
     def _build_manual_tab(self) -> None:
         tab = self.input_tabs.add("Manual")
@@ -274,7 +283,7 @@ class PolynomialRegressionApp(ctk.CTk):
         ).grid(row=9, column=0, sticky="w", padx=4, pady=2)
         ctk.CTkCheckBox(
             tab,
-            text="Remove outliers (IQR)",
+            text="Remove outliers (residual)",
             variable=self.remove_outliers_var,
         ).grid(row=10, column=0, sticky="w", padx=4, pady=2)
 
@@ -300,12 +309,16 @@ class PolynomialRegressionApp(ctk.CTk):
 
     def _build_sample_tab(self) -> None:
         tab = self.input_tabs.add("Sample")
+        tab.grid_rowconfigure(2, weight=1)
         ctk.CTkLabel(tab, text="Choose a synthetic dataset:").grid(row=0, column=0, sticky="w", padx=4, pady=4)
         self.sample_combo = ctk.CTkComboBox(tab, values=list(SAMPLE_DATASET_NAMES))
         self.sample_combo.set("Cubic")
         self.sample_combo.grid(row=1, column=0, sticky="ew", padx=4, pady=4)
+        self.sample_preview = ctk.CTkTextbox(tab, height=180)
+        self.sample_preview.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
+        self.sample_preview.configure(state="disabled")
         ctk.CTkButton(tab, text="Generate", command=self.on_generate_sample).grid(
-            row=2, column=0, sticky="ew", padx=4, pady=4
+            row=3, column=0, sticky="ew", padx=4, pady=4
         )
 
     def _build_csv_preview_section(self) -> None:
@@ -501,7 +514,7 @@ class PolynomialRegressionApp(ctk.CTk):
             return self.test_eval_window
 
         window = ctk.CTkToplevel(self)
-        window.title("Test Evaluation")
+        window.title("Test Accuracy (20% hold-out)")
         window.geometry("760x480")
         window.minsize(640, 360)
         window.transient(self)
@@ -513,7 +526,7 @@ class PolynomialRegressionApp(ctk.CTk):
 
         header = ctk.CTkFrame(container, fg_color="transparent")
         header.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
-        ctk.CTkLabel(header, text="Test Evaluation", font=ctk.CTkFont(size=18, weight="bold")).pack(
+        ctk.CTkLabel(header, text="Test Accuracy — 80/20 split", font=ctk.CTkFont(size=18, weight="bold")).pack(
             side="left"
         )
         self.test_eval_toggle_btn = ctk.CTkButton(
@@ -612,8 +625,8 @@ class PolynomialRegressionApp(ctk.CTk):
 
         self.check_accuracy_btn = ctk.CTkButton(
             self.anim_bar,
-            text="Check Accuracy",
-            command=self.on_check_accuracy_clicked,
+            text="View Accuracy",
+            command=self.on_view_accuracy_clicked,
             height=32,
             width=130,
         )
@@ -677,9 +690,12 @@ class PolynomialRegressionApp(ctk.CTk):
     def on_generate_sample(self) -> None:
         name = self.sample_combo.get()
         data = make_sample_dataset(name)
-        self.manual_text.delete("1.0", "end")
-        self.manual_text.insert("1.0", data)
-        self.input_tabs.set("Manual")
+        self.sample_text = data
+        self.sample_preview.configure(state="normal")
+        self.sample_preview.delete("1.0", "end")
+        self.sample_preview.insert("1.0", data)
+        self.sample_preview.configure(state="disabled")
+        self.input_tabs.set("Sample")
         self.status_label.configure(text="Generated sample: {}".format(name))
 
     def _format_large_number(self, value: float) -> str:
@@ -753,6 +769,7 @@ class PolynomialRegressionApp(ctk.CTk):
         self.cards_frame.grid()
         self.preprocess_report_label.configure(text="")
         self.on_csv_columns_changed()
+        self.input_tabs.set("CSV")
         self.status_label.configure(text="Loaded {} rows".format(len(preview.rows)))
 
     def on_preprocess_clicked(self) -> None:
@@ -794,53 +811,12 @@ class PolynomialRegressionApp(ctk.CTk):
         self._update_preprocess_preview()
         self.status_label.configure(text="Pre-processing complete — {} rows ready".format(report.n_final))
 
-    def _get_evaluation_config(self) -> tuple[list[str], str, float | None]:
-        """Resolve feature names, target, and scale used for test evaluation."""
-        if self.preprocess_result is not None:
-            return (
-                list(self.preprocess_result.feature_names),
-                self.preprocess_result.target_name,
-                self.preprocess_result.target_scale,
-            )
-        if self.training_result is not None:
-            report = self.training_result.preprocess_report
-            target_scale = report.target_scale if report and report.target_normalized else None
-            return (
-                list(self.training_result.feature_names),
-                self.training_result.target_name,
-                target_scale,
-            )
-        return list(self.feature_names), self.target_column_name, None
-
-    def on_check_accuracy_clicked(self) -> None:
-        """Browse test CSV, normalize, evaluate, and show metrics."""
-        if self.model is None:
-            messagebox.showwarning("Check Accuracy", "Please train a model first.")
+    def on_view_accuracy_clicked(self) -> None:
+        """Re-open the 20% hold-out accuracy window from the last training run."""
+        if self._last_test_evaluation is None:
+            messagebox.showinfo("View Accuracy", "No hold-out results yet. Train a model first.")
             return
-
-        path = filedialog.askopenfilename(
-            title="Select test CSV file",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-
-        feature_names, target_name, target_scale = self._get_evaluation_config()
-
-        try:
-            evaluation = evaluate_on_test_csv(
-                self.model,
-                path,
-                feature_names,
-                target_name,
-                target_scale=target_scale,
-            )
-        except Exception as exc:
-            messagebox.showerror("Evaluation Error", str(exc))
-            return
-
-        self._show_test_evaluation_with_eval(evaluation)
-        self.status_label.configure(text="Test evaluation complete — R² = {:.4f}".format(evaluation.metrics["r2"]))
+        self._show_test_evaluation_with_eval(self._last_test_evaluation)
 
     def _show_test_evaluation_with_eval(self, evaluation: TestEvaluationResult) -> None:
         """Display test evaluation metrics and table in a separate window."""
@@ -882,10 +858,7 @@ class PolynomialRegressionApp(ctk.CTk):
         self.view_results_btn.grid()
 
     def on_view_test_results_clicked(self) -> None:
-        if self._last_test_evaluation is None:
-            messagebox.showinfo("Test Evaluation", "No test results yet. Click Check Accuracy first.")
-            return
-        self._show_test_evaluation_with_eval(self._last_test_evaluation)
+        self.on_view_accuracy_clicked()
 
     def _update_preprocess_preview(self) -> None:
         if self.preprocess_result is None:
@@ -1053,9 +1026,9 @@ class PolynomialRegressionApp(ctk.CTk):
 
     def _snapshot_csv_train_config(self) -> dict[str, object] | None:
         """Capture CSV column selection on the main thread before training."""
-        if self.csv_preview is None:
+        if self.input_tabs.get() != "CSV":
             return None
-        if self.input_tabs.get() != "CSV" and self.preprocess_result is None:
+        if self.csv_preview is None:
             return None
 
         feature_names = self._selected_feature_names()
@@ -1084,25 +1057,14 @@ class PolynomialRegressionApp(ctk.CTk):
         lr = float(self.lr_var.get())
         epochs = int(self.epochs_var.get())
         save_every = max(1, int(self.save_every_var.get()))
+        active_tab = self.input_tabs.get()
 
-        if self.preprocess_result is not None and self.csv_preview is not None:
-            result_cfg = self.preprocess_result
-            self.target_column_name = result_cfg.target_name
-            return train_from_csv_selection(
-                self.csv_preview.numeric_data,
-                list(result_cfg.feature_names),
-                result_cfg.target_name,
-                result_cfg.visual_name,
-                degree,
-                lr,
-                epochs,
-                save_every,
-                preprocessed=self.preprocess_result,
-                preprocess_options=self._get_preprocess_options(),
-            )
-
-        if self._train_csv_config is not None and self.csv_preview is not None:
-            cfg = self._train_csv_config
+        if active_tab == "CSV":
+            if self.csv_preview is None:
+                raise ValueError("Please load a training CSV file first.")
+            cfg = self._train_csv_config or self._snapshot_csv_train_config()
+            if cfg is None:
+                raise ValueError("Please select feature and target columns.")
             feature_names = list(cfg["feature_names"])
             target_name = str(cfg["target_name"])
             visual_name = str(cfg["visual_name"])
@@ -1117,8 +1079,14 @@ class PolynomialRegressionApp(ctk.CTk):
                 epochs,
                 save_every,
                 preprocessed=self.preprocess_result,
-                preprocess_options=self._get_preprocess_options(),
+                iqr_multiplier=self._get_preprocess_options().iqr_multiplier,
             )
+
+        if active_tab == "Sample":
+            if not self.sample_text:
+                raise ValueError("Please generate a sample dataset first.")
+            self.target_column_name = "y"
+            return train_from_text(self.sample_text.strip(), degree, lr, epochs, save_every)
 
         self.target_column_name = "y"
         raw_text = self.manual_text.get("1.0", "end").strip()
@@ -1172,6 +1140,19 @@ class PolynomialRegressionApp(ctk.CTk):
 
         self._populate_training_data_table(result.x_data, result.y_data, result.feature_names)
 
+        x_test_visual = None
+        y_test = None
+        y_test_pred = None
+        if result.x_test is not None and result.y_test is not None:
+            x_test = result.x_test
+            y_test = result.y_test
+            if x_test.ndim == 2:
+                x_test_visual = x_test[:, result.visual_feature_index]
+            else:
+                x_test_visual = x_test
+            if result.test_evaluation is not None:
+                y_test_pred = result.test_evaluation.y_pred
+
         self.plot_artists = init_training_artists(
             self.fig,
             self.ax_fit,
@@ -1182,6 +1163,9 @@ class PolynomialRegressionApp(ctk.CTk):
             result.visual_feature_index,
             result.feature_names,
             self.theme_mode,
+            x_test_visual=x_test_visual,
+            y_test=y_test,
+            y_test_pred=y_test_pred,
         )
         total_frames = len(result.model.frames)
         self.frame_slider.configure(to=max(total_frames - 1, 0), number_of_steps=max(total_frames - 1, 1))
@@ -1190,7 +1174,17 @@ class PolynomialRegressionApp(ctk.CTk):
         self._update_training_view()
         self.playing = True
         self._animation_loop()
-        self.status_label.configure(text="Training complete — {} frames".format(total_frames))
+
+        if result.test_evaluation is not None:
+            self._show_test_evaluation_with_eval(result.test_evaluation)
+            n_test = len(result.test_evaluation.y_test)
+            self.status_label.configure(
+                text="Training complete — Test R² = {:.4f} on {} hold-out samples (20%)".format(
+                    result.test_evaluation.metrics["r2"], n_test
+                )
+            )
+        else:
+            self.status_label.configure(text="Training complete — {} frames".format(total_frames))
 
     def _set_animation_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -1305,6 +1299,7 @@ class PolynomialRegressionApp(ctk.CTk):
         self.csv_preview = None
         self.preprocess_result = None
         self._train_csv_config = None
+        self.sample_text = None
         self.feature_names = []
         self.frame_index = 0
         self.viz_mode = "empty"
@@ -1330,11 +1325,10 @@ class PolynomialRegressionApp(ctk.CTk):
         self.csv_stats_label.configure(text="")
         for card in self.stat_cards.values():
             card.configure(text="—")
-        if hasattr(self, "test_metric_labels"):
-            for label in self.test_metric_labels.values():
-                label.configure(text="—")
-        if hasattr(self, "test_tree"):
-            self.test_tree.delete(*self.test_tree.get_children())
+        if hasattr(self, "sample_preview"):
+            self.sample_preview.configure(state="normal")
+            self.sample_preview.delete("1.0", "end")
+            self.sample_preview.configure(state="disabled")
 
         self._show_empty_plots()
         self._set_animation_enabled(False)

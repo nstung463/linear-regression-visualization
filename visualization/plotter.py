@@ -386,20 +386,20 @@ def init_training_artists(
         s=36,
         edgecolors="#1a1a1a",
         linewidths=0.4,
-        label="Train data",
+        label="Train data (80%)",
         zorder=3,
     )
     if x_test_visual is not None and y_test is not None and len(y_test) > 0:
         artists.scatter_test = ax_fit.scatter(
             np.asarray(x_test_visual, dtype=float),
             np.asarray(y_test, dtype=float),
-            c=CHART_COLORS["marker"],
+            c=CHART_COLORS["test_data"],
             alpha=0.9,
             s=64,
-            marker="^",
+            marker="D",
             edgecolors="#FFFFFF",
             linewidths=0.8,
-            label="Test (actual)",
+            label="Test data (20%)",
             zorder=5,
         )
     else:

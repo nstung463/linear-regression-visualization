@@ -12,7 +12,14 @@ import numpy as np
 
 from core.metrics import regression_metrics
 from core.model import PolynomialRegressionGD
-from core.preprocessing import PreprocessOptions, PreprocessReport, preprocess_dataset
+from core.preprocessing import (
+    PreprocessOptions,
+    PreprocessReport,
+    drop_missing_rows,
+    preprocess_dataset,
+    remove_outliers_regression_residual,
+    split_train_test,
+)
 from data.csv_loader import (
     arrays_from_csv_selection,
     describe_numeric,
@@ -44,6 +51,9 @@ class TrainingResult:
     target_name: str
     visual_feature_index: int
     preprocess_report: PreprocessReport | None = None
+    x_test: np.ndarray | None = None
+    y_test: np.ndarray | None = None
+    test_evaluation: TestEvaluationResult | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +130,92 @@ def _fit_model(
     model = PolynomialRegressionGD(degree=degree, lr=lr, epochs=epochs, save_every=save_every)
     model.fit(x_data, y_data)
     return model
+
+
+def _clean_csv_arrays(
+    x_data: np.ndarray,
+    y_data: np.ndarray,
+    iqr_multiplier: float = 1.5,
+) -> tuple[np.ndarray, np.ndarray, PreprocessReport]:
+    """Drop non-finite rows and regression-residual outliers before training."""
+    x = np.asarray(x_data, dtype=float)
+    y = np.asarray(y_data, dtype=float).ravel()
+    if x.ndim == 1:
+        x = x.reshape(-1, 1)
+    n_original = x.shape[0]
+
+    x, y, missing_mask = drop_missing_rows(x, y)
+    n_dropped_missing = int(missing_mask.sum())
+
+    outlier_mask = np.zeros(n_original, dtype=bool)
+    n_dropped_outliers = 0
+    if len(y) > 0:
+        x, y, outlier_mask_partial = remove_outliers_regression_residual(x, y, iqr_multiplier)
+        n_dropped_outliers = int(outlier_mask_partial.sum())
+        if n_dropped_missing > 0:
+            surviving = ~missing_mask
+            full_outlier_mask = np.zeros(n_original, dtype=bool)
+            full_outlier_mask[np.where(surviving)[0][outlier_mask_partial]] = True
+            outlier_mask = full_outlier_mask
+        else:
+            outlier_mask = outlier_mask_partial
+
+    report = PreprocessReport(
+        n_original=n_original,
+        n_dropped_missing=n_dropped_missing,
+        n_dropped_outliers=n_dropped_outliers,
+        n_final=len(y),
+        missing_mask=missing_mask,
+        outlier_mask=outlier_mask,
+        target_normalized=False,
+        target_scale=None,
+    )
+    return x, y, report
+
+
+def _evaluate_holdout(
+    model: PolynomialRegressionGD,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    target_scale: float | None = None,
+) -> TestEvaluationResult:
+    weights = model.frames[-1].weights
+    y_pred = model.predict_with_weights(x_test, weights)
+    metrics = regression_metrics(y_test, y_pred)
+    return TestEvaluationResult(
+        x_test=x_test,
+        y_test=y_test,
+        y_pred=y_pred,
+        metrics=metrics,
+        target_scale=target_scale,
+    )
+
+
+def _train_with_holdout(
+    x_data: np.ndarray,
+    y_data: np.ndarray,
+    degree: int,
+    lr: float,
+    epochs: int,
+    save_every: int,
+    target_scale: float | None = None,
+) -> tuple[
+    PolynomialRegressionGD,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray | None,
+    np.ndarray | None,
+    TestEvaluationResult | None,
+]:
+    """Train on 80% and evaluate on a 20% hold-out split."""
+    if len(y_data) < 5:
+        model = _fit_model(x_data, y_data, degree, lr, epochs, save_every)
+        return model, x_data, y_data, None, None, None
+
+    x_train, x_test, y_train, y_test = split_train_test(x_data, y_data)
+    model = _fit_model(x_train, y_train, degree, lr, epochs, save_every)
+    evaluation = _evaluate_holdout(model, x_test, y_test, target_scale=target_scale)
+    return model, x_train, y_train, x_test, y_test, evaluation
 
 
 def load_csv_for_preview(path: str) -> CsvPreviewData:
@@ -249,14 +345,19 @@ def train_from_text(
     _validate_train_params(degree, lr, epochs)
     x_values, y_values = parse_xy_data(raw_text)
     x_data = x_values.reshape(-1, 1)
-    model = _fit_model(x_data, y_values, degree, lr, epochs, save_every)
+    model, x_train, y_train, x_test, y_test, test_evaluation = _train_with_holdout(
+        x_data, y_values, degree, lr, epochs, save_every
+    )
     return TrainingResult(
         model=model,
-        x_data=x_data,
-        y_data=y_values,
+        x_data=x_train,
+        y_data=y_train,
         feature_names=["x"],
         target_name="y",
         visual_feature_index=0,
+        x_test=x_test,
+        y_test=y_test,
+        test_evaluation=test_evaluation,
     )
 
 
@@ -270,7 +371,7 @@ def train_from_csv_selection(
     epochs: int,
     save_every: int = 1,
     preprocessed: PreprocessResult | None = None,
-    preprocess_options: PreprocessOptions | None = None,
+    iqr_multiplier: float = 1.5,
 ) -> TrainingResult:
     """Train a model from selected CSV columns."""
     _validate_train_params(degree, lr, epochs)
@@ -282,32 +383,31 @@ def train_from_csv_selection(
         x_data = preprocessed.x_data
         y_data = preprocessed.y_data
         preprocess_report = preprocessed.report
-    elif preprocess_options is not None and (
-        preprocess_options.drop_missing
-        or preprocess_options.remove_outliers
-        or preprocess_options.normalize_target
-    ):
-        result = preprocess_csv_selection(
-            numeric_data, feature_names, target_name, visual_name, preprocess_options
-        )
-        x_data = result.x_data
-        y_data = result.y_data
-        preprocess_report = result.report
     else:
-        x_data, y_data = arrays_from_csv_selection(numeric_data, feature_names, target_name)
+        x_raw, y_raw = arrays_from_csv_selection(numeric_data, feature_names, target_name)
+        x_data, y_data, preprocess_report = _clean_csv_arrays(x_raw, y_raw, iqr_multiplier)
 
     if len(y_data) < 2:
         raise ValueError("Need at least 2 valid rows after filtering.")
 
-    model = _fit_model(x_data, y_data, degree, lr, epochs, save_every)
+    target_scale = None
+    if preprocess_report and preprocess_report.target_normalized:
+        target_scale = preprocess_report.target_scale
+
+    model, x_train, y_train, x_test, y_test, test_evaluation = _train_with_holdout(
+        x_data, y_data, degree, lr, epochs, save_every, target_scale=target_scale
+    )
     visual_feature_index = feature_names.index(visual_name)
 
     return TrainingResult(
         model=model,
-        x_data=x_data,
-        y_data=y_data,
+        x_data=x_train,
+        y_data=y_train,
         feature_names=feature_names,
         target_name=target_name,
         visual_feature_index=visual_feature_index,
         preprocess_report=preprocess_report,
+        x_test=x_test,
+        y_test=y_test,
+        test_evaluation=test_evaluation,
     )

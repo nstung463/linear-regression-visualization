@@ -29,6 +29,7 @@ CHART_COLORS = {
     "loss_faded": "#FF1493",
     "kde": "#7B68EE",
     "marker": "#FFD700",
+    "test_data": "#FF6B6B",
 }
 
 LEGEND_KWARGS = {

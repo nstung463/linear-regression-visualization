@@ -51,9 +51,9 @@ def test_preprocess_train_csv_drops_missing_and_outliers() -> None:
     report = result.report
     assert report.n_original == 100
     assert report.n_dropped_missing == 5
-    assert report.n_dropped_outliers == 4
-    assert report.n_final == 91
-    assert len(result.y_data) == 91
+    assert report.n_dropped_outliers == 5
+    assert report.n_final == 90
+    assert len(result.y_data) == 90
     assert report.target_normalized is True
 
 
